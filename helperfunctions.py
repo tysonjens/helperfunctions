@@ -116,6 +116,21 @@ def profit_curve_cost(y_pred_proba, y_cost, cost_red=.05, intervent_cost=300):
 
 ############################### VISUALIZATIONS ###########################
 
+def plot_ci_model_covars(covars, bs_ests, title, image_path_stem, image_name):
+    fig = plt.figure(figsize=(5,2))
+    ax = fig.add_subplot(111)
+    for i in range(len(covars)):
+        var = covars[i]
+        ax.plot([(np.percentile(bs_ests[var], 5)), (np.percentile(bs_ests[var], 95))],
+                 [var,var], color='black')
+        ax.plot((np.percentile(bs_ests[var], 50)), i, 'o', markersize=3, color='red')
+    # ax.plot
+    ax.plot([0,0], [-0.5,(len(covars)-.5)], '--', color='black')
+    ax.set_title(title)
+    ax.set_ylim([-0.5,len(covars)-0.5])
+    ax.set_yticks(covars)
+    fig.savefig(img_pth_stm + '_' + image_name + '.jpg', dpi=300, bbox_inches='tight', pad_inches=.1);
+
 def plot_precision_recall_curve(y_true, y_pred_proba, plot_mins_tf=False,
 	min_precision=.4, min_recall=.4,
 	 title='Precision, Recall by Model Threshold',
