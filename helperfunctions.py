@@ -12,7 +12,8 @@ import math
 
 ############################### DATA ####################################
 
-def pickle_dump(obj_to_pkl, filepath):
+def pickle_dump(obj_to_pkl, filename, data_path_stem, lclyn='y', lcl_pkl="C://Users//TYWARD//Documents"):
+    filepath = data_path_stem + filename
     if os.path.exists(filepath):
         print('File already exists. Overwrite (y/n)?')
         x = input()
@@ -25,6 +26,20 @@ def pickle_dump(obj_to_pkl, filepath):
         print('Wrote object to file.')
     else:
         print('Did not write to file.')
+    lcl_pkl_path = lcl_pkl + filename
+    if lclyn == 'y':
+        if os.path.exists(lcl_pkl_path):
+            print('File already exists. Overwrite (y/n)?')
+            x = input()
+        else: 
+            x = 'y'
+        if x == 'y':
+            outfile = open(lcl_pkl_path, 'wb')
+            pickle.dump(obj_to_pkl, outfile)
+            outfile.close()
+            print('Wrote object to file (local).')
+        else:
+            print('Did not write to file (local).')
 
 def pickle_read(filepath):
     if os.path.exists(filepath):
@@ -340,7 +355,7 @@ def plotroc_bymonth(df, dates_list, date_field='pred_dt', y_true_label='died90',
     ax31.legend(loc="lower right")
     fig3.savefig(imagepath, dpi=300, optimize=True, bbox_inches='tight', pad_inches=.1)
 
-def plot_bs_coefs(bs_coefs, col_names, nbins=10, imagepath='../images/myimage.jpg'):
+def plot_bs_coefs(bs_coefs, col_names, nbins=10, imagepath='../images/myimage.jpg', saveyn = 'n'):
     ax_rows = math.ceil(bs_coefs.shape[1]/3)
     plt_h = ax_rows * 4
     fig, axes = plt.subplots(ax_rows,3, figsize=(14,plt_h))
@@ -349,13 +364,16 @@ def plot_bs_coefs(bs_coefs, col_names, nbins=10, imagepath='../images/myimage.jp
         zero_bar_h = ax.get_ylim()[1]
         ax.plot([0, 0], [0, zero_bar_h], color='red', linestyle='-', linewidth=2)
         ax.set_title(m)
-    if os.path.exists(imagepath):
-        print('Image already exists. Overwrite (y/n)?')
-        x = input()
-    else: 
-        x = 'y'
-    if x == 'y':
-        fig.savefig(imagepath, dpi=300, optimize=True, bbox_inches='tight', pad_inches=.1)
+    if saveyn == 'n':
+        pass
+    else:
+        if os.path.exists(imagepath):
+            print('Image already exists. Overwrite (y/n)?')
+            x = input()
+        else: 
+            x = 'y'
+        if x == 'y':
+            fig.savefig(imagepath, dpi=300, bbox_inches='tight', pad_inches=.1)
 
 ############################### OTHER ###################################
 
@@ -410,10 +428,30 @@ def bootstrap_ci_coefficients(X_train, y_train, num_bootstraps, log_reg_inst, co
     bootstrap_estimates = []
     for i in np.arange(num_bootstraps):
         sample_index = np.random.choice(range(0, len(y_train)), len(y_train))
-        X_samples = X_train[sample_index]
-        y_samples = y_train[sample_index]
+        X_samples = X_train.loc[sample_index]
+        y_samples = y_train.loc[sample_index]
         log_reg_inst.fit(X_samples, y_samples)
         bootstrap_estimates.append(log_reg_inst.coef_[0])
+    bootstrap_estimates = np.asarray(bootstrap_estimates)
+    bootstrap_estimates = pd.DataFrame(bootstrap_estimates, columns=column_names)
+    return bootstrap_estimates
+
+
+## Returns bootstrapped coefficients for all variables in a poisson model
+## Offset data: log of time variable
+
+
+def bootstrap_ci_coeffs_pois(X_train, y_train, num_bootstraps, column_names, offset_data):
+    bootstrap_estimates = []
+    column_names.insert(0, 'Constant')
+    for i in np.arange(num_bootstraps):
+        sample_index = np.random.choice(range(0, len(y_train)), len(y_train))
+        X_samples = X_train.loc[sample_index]
+        y_samples = y_train.loc[sample_index]
+        offset_samples = offset_data.loc[sample_index]
+        model = sm.GLM(y_samples, X_samples, family=sm.families.Poisson(), offset=offset_samples)
+        results = model.fit()
+        bootstrap_estimates.append(results.params)
     bootstrap_estimates = np.asarray(bootstrap_estimates)
     bootstrap_estimates = pd.DataFrame(bootstrap_estimates, columns=column_names)
     return bootstrap_estimates
@@ -432,3 +470,223 @@ def convert_date_to_yrmo(df, date_field, to_field):
         yrmos.append(int(str(row[date_field])[:4] +str(row[date_field])[5:7]))
     df[to_field] = yrmos
     return df
+
+################################# Bootstrapping for different CIs #####################################
+
+
+## find bootstrapped confidence intervals for change in counts
+## from raw data after propensity matching, provides % differences in counts. 
+## for admissions counts, counts limited to 3
+def bootstrap_ci_diff_counts(df, num_bootstraps, col_name, group_col, num_matches=3):
+    bootstrap_estimates = []
+    for i in np.arange(num_bootstraps):
+        sample_index = np.random.choice(range(0, len(df)), len(df))
+        df_samples = df.loc[sample_index]
+        contingency_table = pd.crosstab(df_samples['MSR'], df_samples['f_adm'])
+        c_sum = np.sum(contingency_table.loc[0] * np.array([0, 1, 2, 3]))/num_matches
+        t_sum = np.sum(contingency_table.loc[1] * np.array([0, 1, 2, 3]))
+        bootstrap_estimates.append((t_sum/c_sum)-1)
+    bootstrap_estimates = np.asarray(bootstrap_estimates)
+    return bootstrap_estimates
+
+## find bootstrapped confidence intervals for change in counts per 100 patients
+def bootstrap_ci_cnts_per_100(df, num_bootstraps, col_name, group_col):
+    bootstrap_estimates = []
+    for i in np.arange(num_bootstraps):
+        sample_index = np.random.choice(range(0, len(df)), len(df))
+        df_samples = df.loc[sample_index]
+        c_rate = df_samples[df_samples[group_col]==0][col_name].mean()*100
+        t_rate = df_samples[df_samples[group_col]==1][col_name].mean()*100
+        bootstrap_estimates.append(t_rate-c_rate)
+    bootstrap_estimates = np.asarray(bootstrap_estimates)
+    return bootstrap_estimates
+
+## % changes in number of admitting patients between test and control
+def bootstrap_ci_binary(df, num_bootstraps, col_name, group_col, num_matches=3):
+    bootstrap_estimates = []
+    for i in np.arange(num_bootstraps):
+        sample_index = np.random.choice(range(0, len(df)), len(df))
+        df_samples = df.loc[sample_index]
+        c_sum = df_samples[df_samples[group_col]==0][col_name].sum()/num_matches
+        t_sum = df_samples[df_samples[group_col]==1][col_name].sum()
+        bootstrap_estimates.append((t_sum/c_sum)-1)
+    bootstrap_estimates = np.asarray(bootstrap_estimates)
+    return bootstrap_estimates
+
+def bootstrap_ci_binary_100(df, num_bootstraps, col_name, group_col):
+    bootstrap_estimates = []
+    for i in np.arange(num_bootstraps):
+        sample_index = np.random.choice(range(0, len(df)), len(df))
+        df_samples = df.loc[sample_index]
+        c_sum = df_samples[df_samples[group_col]==0][col_name].mean() * 100
+        t_sum = df_samples[df_samples[group_col]==1][col_name].mean() * 100
+        bootstrap_estimates.append(t_sum - c_sum)
+    bootstrap_estimates = np.asarray(bootstrap_estimates)
+    return bootstrap_estimates
+
+## Recycled Predictions inputs
+## inputs are X matrix (ensure constant added as first columns), coefs (np.array of coefficients from model), column num of treatment, values (usually use 80% conf + mean)
+def recycled_predictions_pois(model, X, coeffs, exp_col, values = [-0.05, 0, 0.05]):
+    n = Xp.shape[0]
+    ## Find values if no patients have exposure
+    X = np.array(X)
+    X[:,exp_col] = 0
+    preds0 = np.sum(model.predict(results.params, X))
+    per_100_values = []
+    X[:,exp_col] = 1
+    for val in values:
+        coeffs[exp_col] = val
+        preds = np.sum(model.predict(coeffs, X))
+        per_100_values.append((preds - preds0)/(n/100))
+    print('For every 100 patients who are exposed, it is estimated that {1:0.2f} additional outcomes will occur. (CI {0:0.2f} to {2:0.2f})'.format(per_100_values[0], per_100_values[1], per_100_values[2]))
+
+
+## Recycled Predictions inputs.
+## inputs are X matrix (ensure constant added as first columns), Xmarg stands for 'X marginal', ie used for marginal effects.
+## coefs (np.array of coefficients from model, add intercept to front), 
+## column num of treatment, values (usually use 80% conf + mean)
+def recycled_predictions(Xmarg, coefs, column_num, values=[-.1, 0, .1]):
+    ## Find values if no patients have exposure
+    Xmarg[:,column_num] = 0
+    odds_no_msr = np.exp(np.dot(Xmarg, coefs))
+    probas_no_msr = odds_no_msr/(1+odds_no_msr)
+    exp_no_msr = probas_no_msr.sum()
+    ## Find values if all patients have exposure
+    per_100_values = []
+    Xmarg[:,column_num] = 1
+    for value in values:
+        coefs[column_num] = value
+        odds_msr = np.exp(np.dot(Xmarg, coefs))
+        probas_msr = odds_msr/(1+odds_msr)
+        exp_msr = probas_msr.sum()
+        per_100_values.append((exp_msr - exp_no_msr)/(len(Xmarg)/100))
+    print('For every 100 patients who are exposed, it is estimated that {1:0.2f} additional outcomes will occur. (CI {0:0.2f} to {2:0.2f})'.format(per_100_values[0], per_100_values[1], per_100_values[2]))
+
+
+## Input: dataframe, an exposure variable, and an outcome.
+## Returns: verbiage reporting the unadjusted odds, probability, and log odds of outcome
+def raw_odds_and_probability(df, exposure, outcome):
+    odds_exp = df[df[exposure]==1][outcome].mean() / (1 - df[df[exposure]==1][outcome].mean())
+    odds_no_exp = df[df[exposure]==0][outcome].mean() / (1 - df[df[exposure]==0][outcome].mean())
+    prob_exp = df[df[exposure]==1][outcome].mean()
+    prob_no_exp = df[df[exposure]==0][outcome].mean()
+    odds_inc = (odds_exp - odds_no_exp) / odds_no_exp
+    prob_inc = (prob_exp - prob_no_exp) / prob_no_exp
+    print('The odds of the outcome for the exposed and non-exposed groups are {0:.2f} and {1:.2f} respectively.'.format(odds_exp, odds_no_exp))
+    print('The probability of the outcome for the exposed and non-exposed groups are {0:.2f}% and {1:.2f}% respectively.'.format(prob_exp*100, prob_no_exp*100))
+    print('Exposure increases the odds of the outcome by {0:.2f}% and the probability of the outcome by {1:.2f}%.'.format(odds_inc*100, prob_inc*100))
+    print('The unadjusted odds ratio is {0:.2f}.'.format(odds_exp / odds_no_exp))
+    print('The unadjusted log odds is {0:.2f}.'.format(np.log(odds_exp / odds_no_exp)))
+
+## Used to provide an example of how an example patient's odds
+## of the outcome change when exposure changes, keeping all other
+## variables constant.
+## Inputs: logistic regression bootstrapped coefficients, 
+## Input: avgp -- np.array of values that describe average patient
+## Input: intercept value from model
+## returns: verbiage describing how odds and probability change
+def modeled_odds_proba_logistic(model_coeffs, avgp, x_cols, intercept, exposure_col):
+    ## Find odds and probability of non_exposed patient
+    lo_ne = intercept
+    index_col = 0
+    avgp[exposure_col] = 0
+    for col in x_cols:
+        lo_ne += (model_coeffs[index_col] * avgp[col])
+        index_col +=1
+    o_ne = np.exp(lo_ne)
+    p_ne = o_ne / (1 + o_ne)
+    avgp[exposure_col] = 1
+    lo_e = intercept
+    index_col = 0
+    for col in x_cols:
+        lo_e += (model_coeffs[index_col] * avgp[col])
+        index_col +=1
+    o_e = np.exp(lo_e)
+    p_e = o_e / (1 + o_e)
+    print('Non Exposed: log odds {0:0.2f}, odds {1:0.2f}, probability {2:0.2f}'.format(lo_ne, o_ne, p_ne))
+    print('Exposed: log odds {0:0.2f}, odds {1:0.2f}, probability {2:0.2f}'.format(lo_e, o_e, p_e))
+
+## Used to provide CIs for all variables in the model
+## not just the exposure
+## Inputs: coefficients (returned from bootstrapped ci)
+## Inputs: confidence level
+
+def model_ci_dataframe(mod_coefs, conf_lev):
+    val_dict = {'lower': ((1-conf_lev)/2*100),
+                'mean': 50,
+                'upper': (((1-conf_lev)/2)+conf_lev)*100}
+    cols = list(mod_coefs.columns)
+    rslt_df = pd.DataFrame(index = list(aa_coefs.columns), columns = ['lower', 'mean', 'upper'])
+    for col in cols:
+        for val in ['lower', 'mean', 'upper']:
+            rslt_df.loc[col, val] = round(np.percentile(mod_coefs[col], val_dict[val]), 2)
+    return rslt_df
+
+
+def case_control_static(df, event='event', stop='stop', exposure='HEART_FAILURE', risk_score='risk_score', hzn=180):
+    results_df = pd.DataFrame({'days': np.arange(0, hzn+1, 1), 'control_exp': 0, 'control_no_exp': 0, 'case_exp': 0, 'case_no_exp': 0}, index=np.arange(0, hzn+1, 1))
+    cases_count = 0  ## person time
+    control_count = 0  ## person time
+    case_exp = 0  ## counts cases that were exposed to toc
+    case_no_ex = 0  ## counts cases that were not exposed to toc
+    control_exp = 0  ## counts controls that were exposed to toc
+    control_no_ex = 0  ## counts controls that were not exposed to toc
+
+    concord_dict = {'concord_exp':0, 'concord_no_exp':0, 'discord_case_exp':0, 'discord_case_no_exp':0}
+
+    for i in range(hzn+1):
+        # print(i)
+
+        cases = df[(df[stop] == i) & (df[event] == True)]
+        controls = df[df[stop] > i]
+        for index, row in cases.iterrows():
+            ## find a control that has the closest risk score to this case
+            cases_count += i
+            if row[exposure] == 1:
+                case_exp += 1
+            else:
+                case_no_ex += 1
+            control = controls.iloc[(controls[risk_score] - row[risk_score]).abs().argsort()[:1]]
+            # print(control)
+            ## randomly choose 1 control from the top 50
+            # control = pot_controls.sample(1)
+            # print(int(control['TOC_2_DAY']))
+            control_count += i
+            ## find the TOC_2_D for that control
+            myval = int(control[exposure])
+            # print(myval)
+            if myval == 1:
+                control_exp += 1
+            else:
+                control_no_ex += 1
+            # print(case_exp, myval)
+            if row[exposure] == myval == 1:
+                concord_dict['concord_exp'] += 1
+            elif row[exposure] == myval == 0:
+                concord_dict['concord_no_exp'] += 1
+            elif (row[exposure] == 1) & (myval == 0):
+                concord_dict['discord_case_exp'] += 1
+            elif (row[exposure] == 0)& (myval == 1):
+                concord_dict['discord_case_no_exp'] += 1
+        ## Record in results_df values collected in this loop
+        results_df.loc[i, 'control_exp'] = control_exp
+        results_df.loc[i, 'control_no_exp'] = control_no_ex
+        results_df.loc[i, 'case_exp'] = case_exp
+        results_df.loc[i, 'case_no_exp'] = case_no_ex
+        results_df['odds_ratio'] = (results_df['case_exp']/results_df['case_no_exp'])/(results_df['control_exp']/results_df['control_no_exp'])
+    return results_df, concord_dict
+
+## Peform a proportions z_test on a binary exposure 
+
+def z_test(df, col, exposure):
+    avg_cont = pd.crosstab(df[col], df[exposure])
+    counts = np.array(avg_cont.loc[1,:])
+    nobs = np.array(avg_cont.sum(axis=0))
+    stat, pval = proportions_ztest(counts, nobs, alternative='smaller')
+    return pval
+
+
+##### Color, color blue and orange for Davita decks
+
+## blue = ((0/255), (105/255), (177/255))
+## orange = ((238/255), (128/255), 0)
