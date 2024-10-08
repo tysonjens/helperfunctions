@@ -4,11 +4,20 @@ import numpy as np
 import pandas as pd
 import os
 import pickle
+import random
+from datetime import date, datetime, timedelta
+from dateutil.relativedelta import relativedelta
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 from matplotlib.patches import Rectangle
+from sklearn.impute import KNNImputer
+from sklearn.preprocessing import StandardScaler
+from sklearn.neighbors import NearestNeighbors
 from sklearn.metrics import confusion_matrix, f1_score, roc_curve, auc, precision_recall_curve, average_precision_score
 import math
+import scipy.stats as st
+import statsmodels.api as sm
+
 
 ############################### DATA ####################################
 
@@ -428,8 +437,8 @@ def bootstrap_ci_coefficients(X_train, y_train, num_bootstraps, log_reg_inst, co
     bootstrap_estimates = []
     for i in np.arange(num_bootstraps):
         sample_index = np.random.choice(range(0, len(y_train)), len(y_train))
-        X_samples = X_train.loc[sample_index]
-        y_samples = y_train.loc[sample_index]
+        X_samples = X_train[sample_index]
+        y_samples = y_train[sample_index]
         log_reg_inst.fit(X_samples, y_samples)
         bootstrap_estimates.append(log_reg_inst.coef_[0])
     bootstrap_estimates = np.asarray(bootstrap_estimates)
@@ -527,18 +536,18 @@ def bootstrap_ci_binary_100(df, num_bootstraps, col_name, group_col):
 ## Recycled Predictions inputs
 ## inputs are X matrix (ensure constant added as first columns), coefs (np.array of coefficients from model), column num of treatment, values (usually use 80% conf + mean)
 def recycled_predictions_pois(model, X, coeffs, exp_col, values = [-0.05, 0, 0.05]):
-    n = Xp.shape[0]
+    n = X.shape[0]
     ## Find values if no patients have exposure
     X = np.array(X)
     X[:,exp_col] = 0
-    preds0 = np.sum(model.predict(results.params, X))
+    preds0 = np.sum(model.predict(coeffs, X))
     per_100_values = []
     X[:,exp_col] = 1
     for val in values:
         coeffs[exp_col] = val
         preds = np.sum(model.predict(coeffs, X))
-        per_100_values.append((preds - preds0)/(n/100))
-    print('For every 100 patients who are exposed, it is estimated that {1:0.2f} additional outcomes will occur. (CI {0:0.2f} to {2:0.2f})'.format(per_100_values[0], per_100_values[1], per_100_values[2]))
+        per_100_values.append(-(preds - preds0)/(n/100))
+    return per_100_values
 
 
 ## Recycled Predictions inputs.
@@ -690,3 +699,291 @@ def z_test(df, col, exposure):
 
 ## blue = ((0/255), (105/255), (177/255))
 ## orange = ((238/255), (128/255), 0)
+
+
+def one_hot_selector(df, cat_col, target, thresh):
+    ### creates new binary variables from a categorical variable for all levels that have relationship
+    ### with target based on chi-square test
+    values = list(df[cat_col].unique())
+    one_hot_values = []
+    for val in values:
+        pval = st.chi2_contingency(st.contingency.crosstab(df[cat_col]==val, df[target]).count).pvalue
+        if pval < thresh:
+            one_hot_values.append(val)
+            new_col_name = cat_col[:4] + '_' + val[0:10] 
+            df[new_col_name] = np.where(df[cat_col]==1, 1, 0)
+    other_val = cat_col[:4] + '_OTHER'
+    df[other_val] = np.where(~df[cat_col].isin(one_hot_values), 1,0)
+    df.drop(columns = cat_col, inplace=True)
+    return df
+
+def impute_eRAF(df, impute_cols):
+    if df['eRAF'].isnull().sum() > 0:
+        if is_sublist(impute_cols, df.columns):
+            imputer = KNNImputer(n_neighbors=5)
+            df[impute_cols] = imputer.fit_transform(df[impute_cols])
+        else:
+            print('Not all eRAF imputation vars are available.')
+    else:
+        print('No nulls in eRAF.')
+    return df
+
+def log_transform(df, cols_to_log):
+    for col in cols_to_log:
+        df[col] = np.log1p(df[col])
+    return df
+
+def scale_columns(df, cols_to_scale):
+    scaler = StandardScaler()
+    scaler.fit(df[cols_to_scale])
+    df[cols_to_scale] = scaler.transform(df[cols_to_scale])
+    return df
+
+def plot_scaled_columns(df, cols_to_scale):
+    fig, axes = plt.subplots(2, 3, figsize=(14, 9))
+    for m, ax in zip(cols_to_scale, axes.flatten()):
+        ax.hist(df[m], bins=30)
+        zero_bar_h = ax.get_ylim()[1]
+        ax.plot([0, 0], [0, zero_bar_h], color='red', linestyle='-', linewidth=2)
+        ax.set_title(m)
+    plt.show()
+
+def one_hot_select(df, cols_to_onehot, trtmnt_var, thresh):
+    for col in cols_to_onehot:
+        df = one_hot_selector(df, col, trtmnt_var, thresh)
+    return df
+
+def standard_processor(df, process_dict, thresh=.05):
+    df = impute_eRAF(df, process_dict['impute_cols'])
+    df = log_transform(df, process_dict['cols_to_log'])
+    df = scale_columns(df, process_dict['cols_to_scale'])
+    plot_scaled_columns(df, process_dict['cols_to_scale'])
+    df = one_hot_select(df, process_dict['cols_to_onehot']
+                            , process_dict['treatment_var'], thresh)
+    return df
+
+def is_sublist(list1, list2):
+    return all(item in list2 for item in list1)
+
+def generate_matched_df(pred_df, n_neigh = 30, trtmnt = 'TOC_2DAY_FLAG', with_replacement=True):
+    caliper = (np.std(pred_df['propensity_score']) * 0.25)
+    # setup knn
+    knn = NearestNeighbors(n_neighbors=n_neigh, radius=caliper)
+    ps_knn = pred_df[['propensity_score']]  # double brackets as a dataframe
+    knn.fit(ps_knn)
+    distances, neighbor_indexes = knn.kneighbors(ps_knn)
+    matched_control = []  # keep track of the matched observations in control
+
+    for current_index, row in pred_df.iterrows():  # iterate over the dataframe
+        if row[trtmnt] == 0:  # the current row is in the control group
+            pred_df.loc[current_index, 'matched'] = np.nan  # set matched to nan
+        else: 
+            for idx in neighbor_indexes[current_index, :]: # for each row in treatment, find the k neighbors
+                # make sure the current row is not the idx - don't match to itself
+                # and the neighbor is in the control 
+                # if (current_index != idx) and (pscores.loc[idx].IRA == 0) and (pscores['ID'].str[:-7].loc[current_index] != pscores['ID'].str[:-7].loc[idx]):
+                if (current_index != idx) and (pred_df.loc[idx][trtmnt] == 0): # and (pscores['EMPI_ID'].loc[current_index] != pscores['EMPI_ID'].loc[idx]):
+                    if idx not in matched_control:
+                        pred_df.loc[current_index, 'matched'] = idx  # record the matching
+                        matched_control.append(idx)
+                        break
+
+    control = pred_df.iloc[matched_control,:].copy().reset_index(drop=True)
+    test = pred_df[pred_df[trtmnt]==1].copy().reset_index(drop=True)
+
+    return test, control
+
+
+    ### After generating propensity scores using psmatch, use this to match patients
+
+def random_idxmin(series):
+    # Find the minimum value
+    min_value = series.min()
+    
+    # Get all indices where the value is equal to the minimum
+    min_indices = series[series == min_value].index
+    
+    # Randomly select one of these indices
+    return np.random.choice(min_indices)
+
+def match_patients(df, intervent = 'TOC_2DAY_FLAG', days_int = '2D_days'
+    , time_to_outcome='duration', match_type = 'random', risk_set=True, score_col='ps_scores', n_matches=1):
+    # Ensure 'TOC_2DAY_FLAG' is the treatment indicator
+    treated = df[df[intervent] == 1].copy()
+    untreated = df[df[intervent] == 0].copy()
+    
+    matched_data = []
+
+    for _, treated_patient in treated.iterrows():
+        # Find untreated patients who had not yet had an event
+        if risk_set:
+            eligible_untreated = untreated[
+            (untreated[time_to_outcome] > treated_patient[days_int]) | 
+            (untreated[time_to_outcome].isna())
+            ].copy().reset_index(drop=True)
+        else:
+            eligible_untreated = untreated.copy()
+
+        if match_type == 'score':
+        
+            if len(eligible_untreated) > 0:
+                for i in range(n_matches):
+                    # Calculate propensity score differences
+                    eligible_untreated['ps_diff'] = abs(eligible_untreated[score_col] - treated_patient[score_col])
+                    
+                    ## Find the index of a random eligible with a tie for the minimum distance
+                    # rand_min_index = random_idxmin(eligible_untreated['ps_diff']
+
+                    # Find the untreated patient with the minimum propensity score difference
+                    best_match = eligible_untreated.loc[eligible_untreated['ps_diff'].idxmin()]
+
+                           # Add matched untreated patient data
+                    untreated_data = best_match.to_dict()
+                    # untreated_data['match_id'] = treated_patient['id']
+                    # untreated_data['match_type'] = 'untreated'
+                    matched_data.append(untreated_data)
+
+
+        elif match_type == 'random':
+            for i in range(n_matches):
+                best_match = eligible_untreated.loc[random.randint(0, len(eligible_untreated)-1)]
+                # Add matched untreated patient data
+                untreated_data = best_match.to_dict()
+                # untreated_data['match_id'] = treated_patient['id']
+                # untreated_data['match_type'] = 'untreated'
+                matched_data.append(untreated_data)
+
+        else:
+            print('Need to provide risk_type argument: random or score.')
+                
+        # Add treated patient data
+        treated_data = treated_patient.to_dict()
+        # treated_data['match_id'] = best_match['id']
+        # treated_data['match_type'] = 'treated'
+        matched_data.append(treated_data)
+    
+    # Create dataframe from matched data
+    result_df = pd.DataFrame(matched_data)
+    
+    # Ensure all original columns are present, add any missing ones
+    for col in df.columns:
+        if col not in result_df.columns:
+            result_df[col] = np.nan
+    
+    # Reorder columns to match original dataframe
+    result_df = result_df[df.columns.tolist()] ##+ ['match_id', 'match_type']]
+    
+    return result_df
+
+
+def update_toc_results_dataframe(df, time, lob, toc, model, horizon, N, effect, eff_low, eff_high, per_100, per_100_low,
+                       per_100_high, today, ua_rp_toc, ua_ar_toc, ua_rp_nontoc,
+                        ua_ar_nontoc, a_rp_toc=None, a_ar_toc=None, a_rp_nontoc=None, a_ar_nontoc=None):
+    # Create a boolean mask to find the matching row
+    mask = (df['time'] == time) & \
+           (df['LOB'] == lob) & \
+           (df['TOC'] == toc) & \
+           (df['model'] == model) & \
+           (df['horizon'] == horizon)
+    
+    # Check if we found exactly one matching row
+    if mask.sum() != 1:
+        print(f"Error: Found {mask.sum()} matching rows. Expected 1.")
+        return
+
+    # Update the values in the matching row
+    df.loc[mask, 'N'] = N
+    df.loc[mask, 'effect'] = effect
+    df.loc[mask, 'eff_low'] = eff_low
+    df.loc[mask, 'eff_high'] = eff_high
+    df.loc[mask, 'per_100'] = per_100
+    df.loc[mask, 'per_100_low'] = per_100_low
+    df.loc[mask, 'per_100_high'] = per_100_high
+    df.loc[mask, 'today'] = today
+    df.loc[mask, 'ua_rp_toc'] = ua_rp_toc
+    df.loc[mask, 'ua_ar_toc'] = ua_ar_toc
+    df.loc[mask, 'ua_rp_nontoc'] = ua_rp_nontoc
+    df.loc[mask, 'ua_ar_nontoc'] = ua_ar_nontoc
+    df.loc[mask, 'a_rp_toc'] = a_rp_toc
+    df.loc[mask, 'a_ar_toc'] = a_ar_toc
+    df.loc[mask, 'a_rp_nontoc'] = a_rp_nontoc
+    df.loc[mask, 'a_ar_nontoc'] = a_ar_nontoc
+    
+    print("DataFrame updated successfully.")
+
+
+
+
+
+def risk_set_matching(df, id_col, treatment_day_col, ever_treated_col, readmission_day_col, n_matches=1):
+
+
+    df_sorted = df.sort_values(treatment_day_col, reset_index=True)
+    treated = df_sorted[df_sorted[ever_treated_col] == 1].copy()
+    untreated = df_sorted[df_sorted[ever_treated_col] == 0].copy()
+    
+    matched_rows = []
+    
+    for _, treated_patient in treated.iterrows():
+        treatment_day = treated_patient[treatment_day_col]
+
+        eligible_untreated = untreated[
+            (untreated[readmission_day_col] > treated_patient[treatment_day]) | 
+            (untreated[readmission_day_col].isna())
+            ].copy()
+        
+        
+        if len(eligible_untreated) >= n_matches:
+            # Randomly select n matches
+            matches = eligible_untreated.sample(n=n_matches, random_state=42)
+            
+            # Add treated patient and matches to the result
+            matched_rows.append(treated_patient.to_dict())
+            matched_rows.extend(matches.to_dict('records'))
+        else:
+            print(f"Warning: Not enough matches for patient {treated_patient[id_col]} on day {treatment_day}")
+    
+    # If matched_rows is empty, return an empty DataFrame with the same columns as the input
+    if not matched_rows:
+        return pd.DataFrame(columns=df.columns)
+    
+    # Create DataFrame from matched_rows and ensure all columns from original DataFrame are present
+    result_df = pd.DataFrame(matched_rows)
+    for col in df.columns:
+        if col not in result_df.columns:
+            result_df[col] = np.nan
+    
+    return result_df[df.columns]
+
+
+def get_date_before_quarter(quarter_string, months_before):
+    # Parse the year and quarter
+    year = int(quarter_string[:4])
+    quarter = int(quarter_string[5])
+    
+    # Calculate the first month of the quarter
+    first_month = (quarter - 1) * 3 + 1
+    
+    # Create a date object for the first day of the quarter
+    quarter_start = datetime(year, first_month, 1)
+    
+    # Subtract the specified number of months
+    result_date = quarter_start - relativedelta(months=months_before)
+    
+    return result_date
+
+def get_last_date_of_quarter(quarter_string):
+    # Parse the year and quarter
+    year = int(quarter_string[:4])
+    quarter = int(quarter_string[5])
+    
+    # Calculate the first month of the quarter
+    first_month = (quarter - 1) * 3 + 1
+    
+    # Create a date object for the first day of the quarter
+    quarter_start = datetime(year, first_month, 1)
+    
+    # Subtract the specified number of months
+    result_date = quarter_start + relativedelta(months=3)
+    
+    return result_date
